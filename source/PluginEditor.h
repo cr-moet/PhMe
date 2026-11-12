@@ -32,6 +32,8 @@ private:
     Analysis::Curve curve;
     std::vector<float> readL, readR;
     float shownGain = 1.0f;
+    bool curvePending = false;
+    unsigned tick = 0;
 
     // Displays
     CorrelationView correlationView;

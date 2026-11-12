@@ -65,9 +65,10 @@ PhMeEditor::PhMeEditor (PhMeProcessor& p)
 
     setResizable (true, true);
     setResizeLimits (1040, 700, 2400, 1600);
+    setOpaque (true);
     setSize (1240, 800);
     sendLookAndFeelChange();   // the value boxes of the knobs were created before the look was set
-    startTimerHz (60);
+    startTimerHz (30);   // enough for meters, and light on the host's message thread
 }
 
 PhMeEditor::~PhMeEditor()
@@ -83,7 +84,7 @@ float PhMeEditor::scopeGain()
     const float target = autoGain->load() > 0.5f
                              ? juce::jlimit (0.5f, 250.0f, 0.9f / juce::jmax (1.0e-6f, broadband.getPeak()))
                              : juce::Decibels::decibelsToGain (zoom->load()) * sqrtHalf;
-    shownGain *= std::pow (target / shownGain, 0.15f);   // glide (in dB)
+    shownGain *= std::pow (target / shownGain, 0.28f);   // glide (in dB)
     return shownGain;
 }
 
@@ -117,8 +118,12 @@ void PhMeEditor::timerCallback()
         scope->setGainText (gainText);
     }
 
-    if (analysed)
+    // The curve: at most 15 times per second (it is averaged anyway, and it is the
+    // largest drawing)
+    curvePending = curvePending || analysed;
+    if (curvePending && (++tick & 1) == 0)
     {
+        curvePending = false;
         static constexpr float octaves[] { 1.0f / 3.0f, 1.0f / 6.0f, 1.0f / 12.0f, 1.0f / 24.0f, 1.0f / 48.0f };
         correlation.evaluate (curve, octaves[(size_t) juce::jlimit (0, 4, juce::roundToInt (resolution->load()))]);
         correlationView.setCurve (curve, hold->load() > 0.5f);

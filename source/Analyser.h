@@ -5,7 +5,7 @@
 //==============================================================================
 // Phase correlation over frequency (runs on the message thread).
 //
-// Short-time FFT of both channels (Hann window, hop of 1/8 frame). Per bin the cross
+// Short-time FFT of both channels (Hann window, hop of 1/4 frame). Per bin the cross
 // power Re(L conj R) and the powers |L|^2, |R|^2 are averaged in time; per display point
 // they are summed over a band of 1/3 ... 1/24 octave (prefix sums) and the correlation is
 //      r = sum Re(L conj R) / sqrt (sum |L|^2 * sum |R|^2)        (-1 ... +1)
@@ -36,7 +36,7 @@ namespace Analysis
             const int order = 13 + (sampleRate > 60000.0 ? 1 : 0) + (sampleRate > 120000.0 ? 1 : 0);   // about 6 Hz bins
             fft = std::make_unique<juce::dsp::FFT> (order);
             size = 1 << order;
-            hop = size / 8;
+            hop = size / 4;   // 75 % overlap
             bins = size / 2 + 1;
 
             window.resize ((size_t) size);

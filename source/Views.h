@@ -28,6 +28,45 @@ namespace Plot
 }
 
 //==============================================================================
+// A static, opaque layer (background, display, grid, labels) rendered once into an
+// image at the physical pixel scale and only redrawn when the size or the scale changes;
+// the render function must fill the whole area
+//==============================================================================
+class CachedLayer
+{
+public:
+    template <typename Render>
+    void draw (juce::Graphics& g, juce::Rectangle<int> bounds, Render&& render)
+    {
+        const float scale = juce::jmax (1.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+        const int w = juce::roundToInt ((float) bounds.getWidth() * scale), h = juce::roundToInt ((float) bounds.getHeight() * scale);
+        if (w <= 0 || h <= 0)
+            return;
+        if (image.getWidth() != w || image.getHeight() != h || ! juce::approximatelyEqual (scale, imageScale))
+        {
+            image = juce::Image (juce::Image::RGB, w, h, false);   // opaque: drawn as a plain copy
+            imageScale = scale;
+            juce::Graphics ig (image);
+            ig.addTransform (juce::AffineTransform::scale (scale));
+            render (ig);
+        }
+        drawAtScale (g, image, imageScale, bounds.getPosition().toFloat());
+    }
+
+    void clear()   { image = {}; }
+
+    // An image made at 'scale' back 1:1 onto the physical pixels (no resampling)
+    static void drawAtScale (juce::Graphics& g, const juce::Image& image, float scale, juce::Point<float> origin)
+    {
+        g.drawImageTransformed (image, juce::AffineTransform::scale (1.0f / scale).translated (origin));
+    }
+
+private:
+    juce::Image image;
+    float imageScale = 0.0f;
+};
+
+//==============================================================================
 // Phase correlation over frequency: +1 (in phase) at the top, 0 in the middle, -1 (out
 // of phase) at the bottom. Above zero the area is dark, below it red; quiet bands fade
 // out. A faint spectrum lies behind, the dashed red line is the minimum since the last
@@ -38,6 +77,8 @@ class CorrelationView final : public juce::Component,
 {
 public:
     std::function<void()> onReset;
+
+    CorrelationView()   { setOpaque (true); }
 
     void setCurve (const Analysis::Curve& c, bool showHold)
     {
@@ -55,39 +96,125 @@ public:
     void resized() override
     {
         plot = getLocalBounds().toFloat().withTrimmedLeft (34.0f).withTrimmedRight (4.0f).withTrimmedBottom (16.0f).withTrimmedTop (2.0f);
+        for (size_t p = 0; p < xs.size(); ++p)
+            xs[p] = xOf (Analysis::frequencyOf ((int) p));
+        layer.clear();
     }
 
     void paint (juce::Graphics& g) override
     {
-        Plot::drawDisplay (g, plot);
-        const auto xOf = [this] (float hz) { return plot.getX() + plot.getWidth() * std::log (hz / Analysis::minHz) / std::log (Analysis::maxHz / Analysis::minHz); };
-        const float mid = plot.getCentreY(), span = plot.getHeight() * 0.46f;
-        const auto yOf = [mid, span] (float r) { return mid - r * span; };
+        // Static part: background, display, grid and labels (cached)
+        layer.draw (g, getLocalBounds(), [this] (juce::Graphics& lg) { drawStatic (lg); });
+        if (! curve.valid)
+            return;
+
+        const float mid = plot.getCentreY();
+        juce::Graphics::ScopedSaveState state (g);
+        g.reduceClipRegion (plot.toNearestInt());
 
         // Spectrum behind (-100 ... 0 dB from the bottom), drawn through the midpoints
-        if (curve.valid)
         {
-            const auto point = [&] (int p)
+            const auto point = [this] (size_t p)
             {
-                const float level = juce::jlimit (0.0f, 1.0f, (curve.levelDb[(size_t) p] + 100.0f) / 100.0f);
-                return juce::Point<float> (xOf (Analysis::frequencyOf (p)), plot.getBottom() - level * plot.getHeight());
+                const float level = juce::jlimit (0.0f, 1.0f, (curve.levelDb[p] + 100.0f) / 100.0f);
+                return juce::Point<float> (xs[p], plot.getBottom() - level * plot.getHeight());
             };
             juce::Path area;
             area.startNewSubPath (plot.getBottomLeft());
             area.lineTo (point (0));
-            for (int p = 1; p < Analysis::numPoints; ++p)
+            for (size_t p = 1; p < (size_t) Analysis::numPoints; ++p)
             {
                 const auto a = point (p - 1), b = point (p);
                 area.quadraticTo (a, (a + b) * 0.5f);
             }
-            area.lineTo (plot.getRight(), point (Analysis::numPoints - 1).y);
+            area.lineTo (plot.getRight(), point ((size_t) Analysis::numPoints - 1).y);
             area.lineTo (plot.getBottomRight());
             area.closeSubPath();
             g.setColour (Colours::text.withAlpha (0.07f));
             g.fillPath (area);
         }
 
-        // Grid
+        // Correlation: one area above zero (dark) and one below (red), each a single shape
+        // filled with a horizontal gradient that fades quiet bands; the line likewise, once
+        // clipped to the upper and once to the lower half
+        juce::Path upper, lower, line;
+        upper.startNewSubPath (xs[0], mid);
+        lower.startNewSubPath (xs[0], mid);
+        for (size_t p = 0; p < (size_t) Analysis::numPoints; ++p)
+        {
+            const float v = curve.correlation[p];
+            if (p > 0)
+            {
+                const float v0 = curve.correlation[p - 1];
+                if ((v0 < 0.0f) != (v < 0.0f))   // crossing zero: both shapes meet there
+                {
+                    const float x = xs[p - 1] + (xs[p] - xs[p - 1]) * v0 / (v0 - v);
+                    upper.lineTo (x, mid);
+                    lower.lineTo (x, mid);
+                }
+            }
+            const float y = yOf (v);
+            upper.lineTo (xs[p], juce::jmin (y, mid));
+            lower.lineTo (xs[p], juce::jmax (y, mid));
+            if (p == 0) line.startNewSubPath (xs[p], y); else line.lineTo (xs[p], y);
+        }
+        for (auto* shape : { &upper, &lower })
+        {
+            shape->lineTo (xs[(size_t) Analysis::numPoints - 1], mid);
+            shape->closeSubPath();
+        }
+
+        const auto gradient = [this] (juce::Colour colour, float alpha)
+        {
+            juce::ColourGradient grad (colour.withAlpha (0.0f), plot.getX(), 0.0f, colour.withAlpha (0.0f), plot.getRight(), 0.0f, false);
+            grad.clearColours();
+            for (size_t p = 0; p < (size_t) Analysis::numPoints; p += 2)
+                grad.addColour (((double) xs[p] - (double) plot.getX()) / (double) plot.getWidth(),
+                                colour.withAlpha (alpha * juce::jlimit (0.12f, 1.0f, (curve.levelDb[p] + 90.0f) / 40.0f)));
+            return grad;
+        };
+        g.setGradientFill (gradient (Colours::text, 0.2f));
+        g.fillPath (upper);
+        g.setGradientFill (gradient (Colours::accent, 0.45f));
+        g.fillPath (lower);
+
+        const juce::PathStrokeType stroke (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+        {
+            juce::Graphics::ScopedSaveState half (g);
+            g.reduceClipRegion (plot.withBottom (mid).toNearestInt());
+            g.setGradientFill (gradient (Colours::text, 0.9f));
+            g.strokePath (line, stroke);
+        }
+        {
+            juce::Graphics::ScopedSaveState half (g);
+            g.reduceClipRegion (plot.withTop (mid).toNearestInt());
+            g.setGradientFill (gradient (Colours::accent, 1.0f));
+            g.strokePath (line, stroke);
+        }
+
+        // Minimum since the last reset
+        if (hold)
+        {
+            juce::Path minimum;
+            minimum.startNewSubPath (xs[0], yOf (curve.minimum[0]));
+            for (size_t p = 1; p < (size_t) Analysis::numPoints; ++p)
+                minimum.lineTo (xs[p], yOf (curve.minimum[p]));
+            const float dashes[] { 4.0f, 3.0f };
+            juce::Path dashed;
+            juce::PathStrokeType (1.0f).createDashedStroke (dashed, minimum, dashes, 2);
+            g.setColour (Colours::accent.withAlpha (0.85f));
+            g.fillPath (dashed);
+        }
+    }
+
+private:
+    float xOf (float hz) const   { return plot.getX() + plot.getWidth() * std::log (hz / Analysis::minHz) / std::log (Analysis::maxHz / Analysis::minHz); }
+    float yOf (float r) const    { return plot.getCentreY() - r * plot.getHeight() * 0.46f; }
+
+    void drawStatic (juce::Graphics& g) const
+    {
+        g.fillAll (Colours::background);
+        Plot::drawDisplay (g, plot);
         g.setFont (Plot::labelFont());
         for (float hz : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
         {
@@ -113,62 +240,13 @@ public:
         g.setFont (Plot::boldFont (10.0f));
         g.drawText ("IN PHASE", plot.reduced (8.0f, 6.0f).removeFromTop (12.0f), juce::Justification::centredLeft);
         g.drawText ("OUT OF PHASE", plot.reduced (8.0f, 6.0f).removeFromBottom (12.0f), juce::Justification::centredLeft);
-
-        if (! curve.valid)
-            return;
-
-        // Correlation: per segment an area down / up to zero and the line; a segment that
-        // crosses zero is split there
-        juce::Graphics::ScopedSaveState state (g);
-        g.reduceClipRegion (plot.toNearestInt());
-        const auto alphaOf = [this] (size_t p) { return juce::jlimit (0.12f, 1.0f, (curve.levelDb[p] + 90.0f) / 40.0f); };
-        const auto piece = [&] (juce::Point<float> a, juce::Point<float> b, bool negative, float alpha)
-        {
-            juce::Path area;
-            area.addQuadrilateral (a.x, mid, a.x, a.y, b.x, b.y, b.x, mid);
-            g.setColour (negative ? Colours::accent.withAlpha (0.45f * alpha) : Colours::text.withAlpha (0.2f * alpha));
-            g.fillPath (area);
-            g.setColour (negative ? Colours::accent.withAlpha (alpha) : Colours::text.withAlpha (0.9f * alpha));
-            g.drawLine ({ a, b }, 1.8f);
-        };
-        for (size_t p = 1; p < (size_t) Analysis::numPoints; ++p)
-        {
-            const float v0 = curve.correlation[p - 1], v1 = curve.correlation[p];
-            const juce::Point<float> a { xOf (Analysis::frequencyOf ((int) p - 1)), yOf (v0) }, b { xOf (Analysis::frequencyOf ((int) p)), yOf (v1) };
-            const float alpha = 0.5f * (alphaOf (p - 1) + alphaOf (p));
-            if ((v0 < 0.0f) != (v1 < 0.0f))
-            {
-                const juce::Point<float> zero { a.x + (b.x - a.x) * v0 / (v0 - v1), mid };
-                piece (a, zero, v0 < 0.0f, alpha);
-                piece (zero, b, v1 < 0.0f, alpha);
-            }
-            else
-                piece (a, b, v0 < 0.0f, alpha);
-        }
-
-        // Minimum since the last reset
-        if (hold)
-        {
-            juce::Path minimum;
-            bool drawing = false;
-            for (size_t p = 0; p < (size_t) Analysis::numPoints; ++p)
-            {
-                const juce::Point<float> pt { xOf (Analysis::frequencyOf ((int) p)), yOf (curve.minimum[p]) };
-                if (drawing) minimum.lineTo (pt); else minimum.startNewSubPath (pt);
-                drawing = true;
-            }
-            const float dashes[] { 4.0f, 3.0f };
-            juce::Path dashed;
-            juce::PathStrokeType (1.0f).createDashedStroke (dashed, minimum, dashes, 2);
-            g.setColour (Colours::accent.withAlpha (0.85f));
-            g.fillPath (dashed);
-        }
     }
 
-private:
     Analysis::Curve curve;
     bool hold = true;
     juce::Rectangle<float> plot;
+    std::array<float, Analysis::numPoints> xs {};   // x of the display points
+    CachedLayer layer;
 };
 
 //==============================================================================
@@ -179,15 +257,18 @@ class CorrelationMeter final : public juce::Component
 public:
     void setValue (float newValue)
     {
-        if (std::abs (newValue - value) > 0.002f)
+        if (std::abs (newValue - value) > 0.005f)
         {
             value = newValue;
             repaint();
         }
     }
 
+    CorrelationMeter()   { setOpaque (true); }
+
     void paint (juce::Graphics& g) override
     {
+        g.fillAll (Colours::background);
         auto r = getLocalBounds().toFloat();
         const auto readout = r.removeFromRight (80.0f).withSizeKeepingCentre (80.0f, 24.0f).translated (0.0f, -5.0f);
         r.removeFromRight (14.0f);
@@ -228,6 +309,26 @@ private:
 class Scope : public juce::Component
 {
 public:
+    Scope()   { setOpaque (true); }
+
+    // Static part (display and grid) from the cache, then the afterglow and the moving parts
+    void paint (juce::Graphics& g) final
+    {
+        pixelScale = juce::jmax (1.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+        layer.draw (g, getLocalBounds(), [this] (juce::Graphics& lg)
+        {
+            lg.fillAll (Colours::background);
+            Plot::drawDisplay (lg, area());
+            drawGrid (lg);
+        });
+        if (trail.isValid())
+            CachedLayer::drawAtScale (g, trail, trailScale, {});
+        drawMoving (g);
+        paintGainText (g, area());
+    }
+
+    void resized() override   { layer.clear(); }
+
     // New samples (the newest at the end), gain in linear units, persistence 0 ... 1
     virtual void addSamples (const float* left, const float* right, int n, float gain, float persistence) = 0;
 
@@ -245,26 +346,30 @@ protected:
 
     juce::Rectangle<float> area() const   { return getLocalBounds().toFloat().reduced (1.0f); }
 
-    // The afterglow image (at the physical pixel scale of the last paint)
+    virtual void drawGrid (juce::Graphics&) = 0;    // static, cached
+    virtual void drawMoving (juce::Graphics&) {}     // every frame
+
+    // The afterglow image (at the physical pixel scale of the last paint). A software image:
+    // its pixels are written directly, which with a GPU-backed image (Direct2D on Windows)
+    // would copy it from and to the graphics card every frame.
     juce::Image& trailImage (float persistence)
     {
         const int w = juce::roundToInt ((float) getWidth() * pixelScale), h = juce::roundToInt ((float) getHeight() * pixelScale);
         if (w <= 0 || h <= 0)
             return trail;
         if (trail.getWidth() != w || trail.getHeight() != h)
-            trail = juce::Image (juce::Image::ARGB, w, h, true);
+        {
+            trail = juce::Image (juce::Image::ARGB, w, h, true, juce::SoftwareImageType());
+            trailScale = pixelScale;
+        }
         else if (persistence <= 0.0f)
             trail.clear (trail.getBounds());
         else
-            trail.multiplyAllAlphas (0.45f + 0.5f * persistence);   // 0.45 ... 0.95 per frame
+        {
+            const float fade = 0.45f + 0.5f * persistence;   // per 1/60 s; the editor runs at 30 Hz
+            trail.multiplyAllAlphas (fade * fade);
+        }
         return trail;
-    }
-
-    void paintTrail (juce::Graphics& g)
-    {
-        pixelScale = juce::jmax (1.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
-        if (trail.isValid())
-            g.drawImage (trail, getLocalBounds().toFloat());
     }
 
     void paintGainText (juce::Graphics& g, juce::Rectangle<float> r)
@@ -319,8 +424,9 @@ protected:
     }
 
     juce::Image trail;
-    float pixelScale = 1.0f;
+    float pixelScale = 1.0f, trailScale = 1.0f;   // of the last paint / of the trail image
     juce::String gainText;
+    CachedLayer layer;
 };
 
 //==============================================================================
@@ -335,7 +441,7 @@ public:
         if (! image.isValid())
             return;
         const auto [centre, radius] = halfDisc (area());
-        const float s = pixelScale, r = radius * s * gain * sqrtHalf;
+        const float s = trailScale, r = radius * s * gain * sqrtHalf;
         const float cx = centre.x * s, cy = centre.y * s;
         const auto ink = Colours::text.withAlpha (0.5f).getPixelARGB();
         const int size = juce::jmax (1, juce::roundToInt (s * 1.5f));
@@ -355,14 +461,10 @@ public:
         repaint();
     }
 
-    void paint (juce::Graphics& g) override
+    void drawGrid (juce::Graphics& g) override
     {
-        const auto r = area();
-        Plot::drawDisplay (g, r);
-        const auto [centre, radius] = halfDisc (r);
+        const auto [centre, radius] = halfDisc (area());
         drawHalfDisc (g, centre, radius, { 0.25f, 0.5f, 0.75f, 1.0f });
-        paintTrail (g);
-        paintGainText (g, r);
     }
 };
 
@@ -395,30 +497,37 @@ public:
         // Level per sector (relative to the gain), a little smoothed between neighbours,
         // fast up and falling with the persistence
         const float gainDb = juce::Decibels::gainToDecibels (gain);
-        const float fall = 0.4f + 2.6f * (1.0f - persistence);   // dB per frame
+        const float fall = 0.8f + 5.2f * (1.0f - persistence);   // dB per frame (30 Hz)
         for (size_t k = 0; k < (size_t) numSectors; ++k)
         {
             const float p = 0.25f * power[k == 0 ? k : k - 1] + 0.5f * power[k] + 0.25f * power[k + 1 < (size_t) numSectors ? k + 1 : k];
             const float db = 10.0f * std::log10 (p / (float) n + 1.0e-20f) + 2.0f * gainDb;
             levels[k] = juce::jmax (db, levels[k] - fall);
-            if (levels[k] >= peaks[k]) { peaks[k] = levels[k]; holds[k] = 90; }
-            else if (--holds[k] < 0)   peaks[k] -= 0.5f;
+            if (levels[k] >= peaks[k]) { peaks[k] = levels[k]; holds[k] = 45; }
+            else if (--holds[k] < 0)   peaks[k] -= 1.0f;
         }
         repaint();
     }
 
-    void paint (juce::Graphics& g) override
+    void drawGrid (juce::Graphics& g) override
     {
-        const auto r = area();
-        Plot::drawDisplay (g, r);
-        const auto [centre, radius] = halfDisc (r);
+        const auto [centre, radius] = halfDisc (area());
         drawHalfDisc (g, centre, radius, { 0.25f, 0.5f, 0.75f, 1.0f });
+        g.setColour (Colours::text.withAlpha (0.5f));
+        g.setFont (Plot::labelFont (9.0f));
+        for (float ring : { 0.25f, 0.5f, 0.75f })
+            g.drawText (juce::String (-juce::roundToInt ((1.0f - ring) * rangeDb)),
+                        juce::Rectangle<float> (24.0f, 10.0f).withCentre ({ centre.x + radius * ring - 10.0f, centre.y - 6.0f }), juce::Justification::centred);
+    }
 
-        const auto pointOf = [&] (size_t k, float db)
+    void drawMoving (juce::Graphics& g) override
+    {
+        const auto [centre, radius] = halfDisc (area());
+        const auto pointOf = [&, c = centre, rad = radius] (size_t k, float db)
         {
             const float a = ((float) k + 0.5f) / (float) numSectors * juce::MathConstants<float>::pi - juce::MathConstants<float>::halfPi;
-            const float length = juce::jlimit (0.0f, 1.0f, (db + rangeDb) / rangeDb) * radius;
-            return centre + juce::Point<float> (std::sin (a), -std::cos (a)) * length;
+            const float length = juce::jlimit (0.0f, 1.0f, (db + rangeDb) / rangeDb) * rad;
+            return c + juce::Point<float> (std::sin (a), -std::cos (a)) * length;
         };
         juce::Path shape;
         shape.startNewSubPath (centre);
@@ -430,17 +539,12 @@ public:
         g.setColour (Colours::text.withAlpha (0.85f));
         g.strokePath (shape, juce::PathStrokeType (1.2f, juce::PathStrokeType::curved));
 
-        g.setColour (Colours::accent);
+        juce::Path peakDots;
         for (size_t k = 0; k < (size_t) numSectors; ++k)
             if (peaks[k] > -rangeDb)
-                g.fillEllipse (juce::Rectangle<float> (2.6f, 2.6f).withCentre (pointOf (k, peaks[k])));
-
-        g.setColour (Colours::text.withAlpha (0.5f));
-        g.setFont (Plot::labelFont (9.0f));
-        for (float ring : { 0.25f, 0.5f, 0.75f })
-            g.drawText (juce::String (-juce::roundToInt ((1.0f - ring) * rangeDb)),
-                        juce::Rectangle<float> (24.0f, 10.0f).withCentre ({ centre.x + radius * ring - 10.0f, centre.y - 6.0f }), juce::Justification::centred);
-        paintGainText (g, r);
+                peakDots.addEllipse (juce::Rectangle<float> (2.6f, 2.6f).withCentre (pointOf (k, peaks[k])));
+        g.setColour (Colours::accent);
+        g.fillPath (peakDots);
     }
 
 private:
@@ -461,7 +565,7 @@ public:
         if (! image.isValid() || n <= 0)
             return;
         const auto [centre, radius] = square (area());
-        const float s = pixelScale, r = radius * s * gain * sqrtHalf;
+        const float s = trailScale, r = radius * s * gain * sqrtHalf;
         const float cx = centre.x * s, cy = centre.y * s, edge = radius * s;
         const auto pointOf = [&] (int i)
         {
@@ -469,26 +573,36 @@ public:
                                        cy - juce::jlimit (-edge, edge, (left[i] + right[i]) * r));
         };
 
-        juce::Path path;
-        path.startNewSubPath (hasLast ? last : pointOf (0));
+        // The samples joined: dots every pixel along each line (direct pixel writes)
+        const auto ink = Colours::text.withAlpha (0.4f).getPixelARGB();
+        const int size = juce::jmax (1, juce::roundToInt (s));
+        juce::Image::BitmapData data (image, juce::Image::BitmapData::readWrite);
+        auto from = hasLast ? last : pointOf (0);
         for (int i = 0; i < n; ++i)
-            path.lineTo (pointOf (i));
-        last = pointOf (n - 1);
+        {
+            const auto to = pointOf (i);
+            const int steps = juce::jlimit (1, 256, (int) (juce::jmax (std::abs (to.x - from.x), std::abs (to.y - from.y)) / (float) size));
+            for (int k = 1; k <= steps; ++k)
+            {
+                const auto p = from + (to - from) * ((float) k / (float) steps);
+                plotDot (data, p.x, p.y, size, ink);
+            }
+            from = to;
+        }
+        last = from;
         hasLast = true;
-
-        juce::Graphics g (image);
-        g.setColour (Colours::text.withAlpha (0.55f));
-        g.strokePath (path, juce::PathStrokeType (juce::jmax (1.0f, 0.9f * s)));
         repaint();
     }
 
-    void resized() override   { hasLast = false; }
-
-    void paint (juce::Graphics& g) override
+    void resized() override
     {
-        const auto r = area();
-        Plot::drawDisplay (g, r);
-        const auto [centre, radius] = square (r);
+        Scope::resized();
+        hasLast = false;
+    }
+
+    void drawGrid (juce::Graphics& g) override
+    {
+        const auto [centre, radius] = square (area());
 
         g.setColour (Colours::grid);
         juce::Path diamond;   // the edge for the full scale of one channel
@@ -510,8 +624,6 @@ public:
         label ("S", { centre.x - radius - 9.0f, centre.y });
         label ("S", { centre.x + radius + 9.0f, centre.y });
 
-        paintTrail (g);
-        paintGainText (g, r);
     }
 
 private:
