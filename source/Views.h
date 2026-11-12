@@ -21,9 +21,7 @@ namespace Plot
         g.fillRect (r.withHeight (5.0f));
         g.setColour (juce::Colours::white.withAlpha (0.55f));
         g.drawLine (r.getX(), r.getBottom() - 0.5f, r.getRight(), r.getBottom() - 0.5f, 1.0f);
-        g.setColour (colour);
-        g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 15.0f, juce::Font::bold)));
-        g.drawText (text, r, juce::Justification::centred);
+        SevenSegment::draw (g, r, text, colour);
     }
 
     inline juce::String signedValue (float v, int decimals)   { return (v >= 0.0f ? "+" : "") + juce::String (v, decimals); }
@@ -214,7 +212,7 @@ public:
         g.fillRect (fill);
         g.fillRect (juce::Rectangle<float> (3.0f, bar.getHeight() - 4.0f).withCentre ({ x1, bar.getCentreY() }));
 
-        Plot::drawReadout (g, readout, Plot::signedValue (value, 2), value < 0.0f ? Colours::accent : Colours::accent.brighter (0.3f));
+        Plot::drawReadout (g, readout, Plot::signedValue (value, 2), Colours::accent);
     }
 
 private:

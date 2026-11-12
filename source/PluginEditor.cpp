@@ -119,8 +119,8 @@ void PhMeEditor::timerCallback()
 
     if (analysed)
     {
-        static constexpr float octaves[] { 1.0f / 3.0f, 1.0f / 6.0f, 1.0f / 12.0f, 1.0f / 24.0f };
-        correlation.evaluate (curve, octaves[(size_t) juce::jlimit (0, 3, juce::roundToInt (resolution->load()))]);
+        static constexpr float octaves[] { 1.0f / 3.0f, 1.0f / 6.0f, 1.0f / 12.0f, 1.0f / 24.0f, 1.0f / 48.0f };
+        correlation.evaluate (curve, octaves[(size_t) juce::jlimit (0, 4, juce::roundToInt (resolution->load()))]);
         correlationView.setCurve (curve, hold->load() > 0.5f);
     }
     correlationMeter.setValue (broadband.correlation());
@@ -160,7 +160,7 @@ void PhMeEditor::resized()
     area.removeFromTop (headerHeight + 14);
     area.removeFromBottom (14);
 
-    auto controls = area.removeFromBottom (150);
+    auto controls = area.removeFromBottom (104);
     area.removeFromBottom (14);
 
     const int scopeWidth = juce::jlimit (340, 560, area.getWidth() * 3 / 10);
@@ -193,27 +193,32 @@ void PhMeEditor::resized()
     controls.removeFromRight (18);
     correlationPanel = controls;
 
-    const auto inner = [] (juce::Rectangle<int> r) { return r.reduced (30, 14); };
+    // One row per panel, left to right: small knobs (label above), the other controls
+    // centred on the height of the knobs
+    const auto inner = [] (juce::Rectangle<int> r) { return r.reduced (32, 6); };
     const auto place = [] (LabelledKnob& k, juce::Rectangle<int> cell)
     {
-        k.label.setBounds (cell.removeFromTop (16));
-        k.knob.setBounds (cell.withSizeKeepingCentre (juce::jmin (cell.getWidth(), 100), cell.getHeight()));
+        k.label.setBounds (cell.removeFromTop (14));
+        k.knob.setBounds (cell.withSizeKeepingCentre (juce::jmin (cell.getWidth(), 96), 78));
+        return k.knob.getY() + (78 - 20) / 2;   // centre of the knob (above its value box)
     };
+    const auto at = [] (juce::Rectangle<int> cell, int height, int centreY) { return cell.withHeight (height).withY (centreY - height / 2); };
 
     auto c = inner (correlationPanel);
-    place (averageKnob, c.removeFromLeft (120));
-    c.removeFromLeft (24);
-    auto column = c.removeFromLeft (150).withSizeKeepingCentre (150, 100);
-    resolutionLabel.setBounds (column.removeFromTop (18));
-    resolutionBox.setBounds (column.removeFromTop (30));
-    column.removeFromTop (12);
-    holdButton.setBounds (column.removeFromLeft (72).withHeight (38));
-    column.removeFromLeft (6);
-    resetButton.setBounds (column.withHeight (38));
+    const int rowCentre = place (averageKnob, c.removeFromLeft (96));
+    c.removeFromLeft (20);
+    auto column = c.removeFromLeft (150);
+    resolutionLabel.setBounds (column.removeFromTop (14));
+    resolutionBox.setBounds (at (column, 32, rowCentre));
+    c.removeFromLeft (16);
+    holdButton.setBounds (at (c.removeFromLeft (76), 38, rowCentre));
+    c.removeFromLeft (8);
+    resetButton.setBounds (at (c.removeFromLeft (76), 38, rowCentre));
 
     auto s = inner (scopePanel);
-    const int knobWidth = juce::jmin (110, (s.getWidth() - 100) / 2);
-    place (zoomKnob, s.removeFromLeft (knobWidth));
-    place (persistKnob, s.removeFromLeft (knobWidth));
-    autoGainButton.setBounds (s.withSizeKeepingCentre (juce::jmin (s.getWidth(), 100), 44));
+    place (zoomKnob, s.removeFromLeft (96));
+    s.removeFromLeft (8);
+    place (persistKnob, s.removeFromLeft (96));
+    s.removeFromLeft (14);
+    autoGainButton.setBounds (at (s.removeFromLeft (juce::jmin (s.getWidth(), 104)), 38, rowCentre));
 }

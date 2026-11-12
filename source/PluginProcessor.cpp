@@ -23,7 +23,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PhMeProcessor::createParamet
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::average, 1 }, "Average",
                                                        NormalisableRange<float> (0.05f, 5.0f, 0.0f, 0.4f), 0.5f, seconds));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::resolution, 1 }, "Resolution",
-                                                        StringArray { "1/3 OCT", "1/6 OCT", "1/12 OCT", "1/24 OCT" }, 1));
+                                                        StringArray { "1/3 OCT", "1/6 OCT", "1/12 OCT", "1/24 OCT", "1/48 OCT" }, 1));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::hold, 1 }, "Hold", true));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::zoom, 1 }, "Zoom",
                                                        NormalisableRange<float> (-12.0f, 36.0f, 0.1f), 0.0f, decibels));

@@ -14,6 +14,100 @@ namespace Colours
 }
 
 //==============================================================================
+// Seven segment LED display: digits, sign and decimal point as lit segments over the
+// faint unlit "8"; anything else (the unit) follows in small letters
+//==============================================================================
+namespace SevenSegment
+{
+    // Segments a ... g of the digits 0 ... 9 (bit 0 = a: top, then clockwise, g: middle)
+    inline constexpr unsigned char digitMasks[10] { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+
+    inline void drawDigit (juce::Graphics& g, juce::Rectangle<float> cell, unsigned mask, bool plusBar, juce::Colour lit)
+    {
+        const float h = cell.getHeight(), w = cell.getWidth(), t = h * 0.13f, gap = t * 0.18f;
+        const float x0 = cell.getX(), y0 = cell.getY(), skew = 0.08f;
+        const auto pt = [&] (float x, float y) { return juce::Point<float> (x0 + x + (h - y) * skew, y0 + y); };
+        const auto horizontal = [&] (float y)
+        {
+            juce::Path p;
+            p.startNewSubPath (pt (gap + t * 0.5f, y)); p.lineTo (pt (gap + t, y - t * 0.5f)); p.lineTo (pt (w - gap - t, y - t * 0.5f));
+            p.lineTo (pt (w - gap - t * 0.5f, y)); p.lineTo (pt (w - gap - t, y + t * 0.5f)); p.lineTo (pt (gap + t, y + t * 0.5f));
+            p.closeSubPath();
+            return p;
+        };
+        const auto vertical = [&] (float x, float yTop, float yBottom)
+        {
+            juce::Path p;
+            p.startNewSubPath (pt (x, yTop + gap)); p.lineTo (pt (x + t * 0.5f, yTop + gap + t * 0.5f)); p.lineTo (pt (x + t * 0.5f, yBottom - gap - t * 0.5f));
+            p.lineTo (pt (x, yBottom - gap)); p.lineTo (pt (x - t * 0.5f, yBottom - gap - t * 0.5f)); p.lineTo (pt (x - t * 0.5f, yTop + gap + t * 0.5f));
+            p.closeSubPath();
+            return p;
+        };
+        const float top = t * 0.5f, mid = h * 0.5f, bottom = h - t * 0.5f, left = t * 0.5f, right = w - t * 0.5f;
+        const juce::Path segments[7] { horizontal (top), vertical (right, top, mid), vertical (right, mid, bottom), horizontal (bottom),
+                                       vertical (left, mid, bottom), vertical (left, top, mid), horizontal (mid) };
+        for (unsigned i = 0; i < 7; ++i)
+        {
+            const bool on = (mask >> i) & 1u;
+            g.setColour (on ? lit : lit.withAlpha (0.09f));
+            g.fillPath (segments[i]);
+        }
+        if (plusBar)   // the "+": a short vertical bar through the middle
+        {
+            g.setColour (lit);
+            g.fillPath (vertical (w * 0.5f, mid - h * 0.22f, mid + h * 0.22f));
+        }
+    }
+
+    // Text into 'area', right aligned like a meter display
+    inline void draw (juce::Graphics& g, juce::Rectangle<float> area, const juce::String& text, juce::Colour lit)
+    {
+        juce::String digits, unit;
+        for (auto c : text)
+        {
+            if (unit.isEmpty() && (juce::CharacterFunctions::isDigit (c) || c == '-' || c == '+' || c == '.' || c == ','))
+                digits += c;
+            else if (unit.isNotEmpty() || c != ' ')
+                unit += c;
+        }
+        unit = unit.trim();
+
+        const float h = juce::jmin (area.getHeight() * 0.64f, 16.0f), w = h * 0.62f, step = w + h * 0.22f, pointStep = h * 0.26f;
+        const juce::Font unitFont (juce::FontOptions (juce::jmax (8.0f, h * 0.72f), juce::Font::bold));
+        const float unitWidth = unit.isEmpty() ? 0.0f : juce::GlyphArrangement::getStringWidth (unitFont, unit) + h * 0.3f;
+        float total = unitWidth;
+        for (auto c : digits)
+            total += (c == '.' || c == ',') ? pointStep : step;
+        float x = area.getCentreX() - total * 0.5f;
+        const float y = area.getCentreY() - h * 0.5f;
+
+        for (auto c : digits)
+        {
+            if (c == '.' || c == ',')   // decimal point: its own narrow cell at the bottom
+            {
+                const float d = h * 0.15f;
+                g.setColour (lit);
+                g.fillRect (juce::Rectangle<float> (d, d).withCentre ({ x + pointStep * 0.5f - h * 0.11f, y + h - d * 0.5f }));
+                x += pointStep;
+                continue;
+            }
+            const auto cell = juce::Rectangle<float> (x, y, w, h);
+            if (juce::CharacterFunctions::isDigit (c))
+                drawDigit (g, cell, digitMasks[c - '0'], false, lit);
+            else
+                drawDigit (g, cell, 0x40, c == '+', lit);   // '-' / '+'
+            x += step;
+        }
+        if (unit.isNotEmpty())
+        {
+            g.setColour (lit);
+            g.setFont (unitFont);
+            g.drawText (unit, juce::Rectangle<float> (x + h * 0.2f, y, unitWidth, h), juce::Justification::bottomLeft);
+        }
+    }
+}
+
+//==============================================================================
 // Hardware look:
 //  - buttons (as in DevTest): flat face with a darker lower edge and a light upper edge,
 //    they sink in when pressed; toggle buttons stay sunk while on and show a small LED
@@ -371,8 +465,10 @@ public:
         // upper edge, light lower edge and a faint glass reflection
         void paint (juce::Graphics& g) override
         {
-            juce::Label::paint (g);
             const auto r = getLocalBounds().toFloat();
+            g.fillAll (findColour (juce::Label::backgroundColourId));
+            if (! isBeingEdited())
+                SevenSegment::draw (g, r, getText(), Colours::accent);
             const auto shade = [&g] (juce::Rectangle<float> band, juce::Point<float> from, juce::Point<float> to, float alpha)
             {
                 g.setGradientFill (juce::ColourGradient (juce::Colours::black.withAlpha (alpha), from, juce::Colours::transparentBlack, to, false));
